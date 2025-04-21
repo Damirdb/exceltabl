@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using ClosedXML.Excel;
+// Нужно сделать проверку суммы трудоемкости = 240 и переделать элемент проверки разницы, где значения умножаются на 10, вместо проверки на плавующую точку
 
 namespace exceltabl
 {
