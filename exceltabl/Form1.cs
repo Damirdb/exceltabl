@@ -221,12 +221,15 @@ namespace exceltabl
                             // Оставшиеся дисциплины для подбора блока
                             var blockDisciplinesForBlock = blockDisciplines.Where(d => !excludedDisciplines.Contains(d.Name)).ToList();
 
-                            // Ограничиваем количество гибких дисциплин до 10
-                            var flexible = blockDisciplinesForBlock
+                            // Сортируем дисциплины по разнице между max и min значениями
+                            var sortedDisciplines = blockDisciplinesForBlock
                                 .OrderByDescending(d => d.MaxValue - d.MinValue)
-                                .Take(13)
                                 .ToList();
-                            var fixedDiscs = blockDisciplinesForBlock.Except(flexible).ToList();
+
+                            // Берем половину дисциплин для гибкой группы
+                            int flexibleCount = sortedDisciplines.Count / 2;
+                            var flexible = sortedDisciplines.Take(flexibleCount).ToList();
+                            var fixedDiscs = sortedDisciplines.Skip(flexibleCount).ToList();
 
                             foreach (var d in fixedDiscs)
                                 path[d.Id] = d.MinValue;
@@ -488,7 +491,7 @@ namespace exceltabl
         }
 
         // Чистый рекурсивный перебор по всем дисциплинам от min до max с шагом 0.5
-       
+
 
         private void StrictRecursiveSearch(List<Discipline> disciplines, int index, Dictionary<string, double> current, List<Dictionary<string, double>> results)
         {
@@ -833,4 +836,4 @@ namespace exceltabl
             };
         }
     }
-}
+} /// в выводе 1 максимальный варианта, вывод всех не удалять, закоментировать
