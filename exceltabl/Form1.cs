@@ -226,8 +226,8 @@ namespace exceltabl
                                 .OrderByDescending(d => d.MaxValue - d.MinValue)
                                 .ToList();
 
-                            // Берем половину дисциплин для гибкой группы
-                            int flexibleCount = sortedDisciplines.Count / 2;
+                            // Берем половину дисциплин для гибкой группы, округляя вверх
+                            int flexibleCount = (int)Math.Ceiling(sortedDisciplines.Count / 2.0);
                             var flexible = sortedDisciplines.Take(flexibleCount).ToList();
                             var fixedDiscs = sortedDisciplines.Skip(flexibleCount).ToList();
 
@@ -687,6 +687,118 @@ namespace exceltabl
             using (var workbook = new ClosedXML.Excel.XLWorkbook())
             {
                 var sheet = workbook.Worksheets.Add("Варианты");
+                // Заголовки
+                sheet.Cell(1, 1).Value = "Название дисциплины";
+                sheet.Cell(1, 2).Value = "min трудоемкость";
+                sheet.Cell(1, 3).Value = "max трудоемкость";
+                sheet.Cell(1, 4).Value = "коэф. значимости";
+                sheet.Cell(1, 5).Value = "№ семестра";
+                sheet.Cell(1, 6).Value = "количество вариантов";
+                sheet.Cell(1, 7).Value = "сумма по семестру";
+                sheet.Cell(1, 8).Value = "сумма за год - Фд";
+                sheet.Cell(1, 9).Value = "Трудоемкость";
+
+                int maxIndex = objectiveValues.IndexOf(objectiveValues.Max());
+                var variant = variants[maxIndex];
+                int totalVariants = variants.Count; // теперь реальное количество вариантов
+
+                // Группируем дисциплины по семестрам
+                var semToDiscs = new Dictionary<int, List<Discipline>>();
+                foreach (var disc in disciplines)
+                {
+                    foreach (var sem in disc.Semesters)
+                    {
+                        if (!semToDiscs.ContainsKey(sem)) semToDiscs[sem] = new List<Discipline>();
+                        semToDiscs[sem].Add(disc);
+                    }
+                }
+                var semesters = semToDiscs.Keys.OrderBy(x => x).ToList();
+
+                int row = 2;
+                double prevSemSumForYear = 0; // Для суммы за год
+                for (int i = 1; i <= 8; i++)
+                {
+                    if (!semToDiscs.ContainsKey(i)) continue;
+                    double semSum = 0;
+                    foreach (var disc in semToDiscs[i].Distinct())
+                    {
+                        sheet.Cell(row, 1).Value = disc.Name;
+                        sheet.Cell(row, 2).Value = disc.MinValue;
+                        sheet.Cell(row, 3).Value = disc.MaxValue;
+                        sheet.Cell(row, 4).Value = disc.Coefficient;
+                        sheet.Cell(row, 5).Value = i;
+                        // Количество уникальных значений трудоемкости для этой дисциплины во всех вариантах
+                        int countForDiscipline = 1;
+                        if (disc.MinValue != disc.MaxValue)
+                        {
+                            var valuesSet = new HashSet<double>();
+                            foreach (var v in variants)
+                            {
+                                if (v.TryGetValue(disc.Id, out var val))
+                                    valuesSet.Add(val);
+                            }
+                            if (valuesSet.Count > 0)
+                                countForDiscipline = valuesSet.Count;
+                        }
+                        sheet.Cell(row, 6).Value = countForDiscipline;
+                        // Трудоемкость для этого варианта
+                        double value = excludedDisciplines.Contains(disc.Name)
+                            ? disc.MinValue
+                            : variant.TryGetValue(disc.Id, out var val2) ? val2 : disc.MinValue;
+                        sheet.Cell(row, 9).Value = value;
+                        semSum += value;
+                        row++;
+                    }
+                    // Строка с суммой по семестру (жёлтая)
+                    sheet.Cell(row, 7).Value = semSum;
+                    var sumCell = sheet.Cell(row, 7);
+                    sumCell.Style.Fill.BackgroundColor = XLColor.Yellow;
+                    // Если это второй семестр в паре, добавляем сумму за год (зелёная)
+                    if (i % 2 == 0)
+                    {
+                        double yearSum = prevSemSumForYear + semSum;
+                        sheet.Cell(row, 8).Value = yearSum;
+                        var yearCell = sheet.Cell(row, 8);
+                        yearCell.Style.Fill.BackgroundColor = XLColor.LightGreen;
+                        prevSemSumForYear = 0; // сброс для следующей пары
+                    }
+                    else
+                    {
+                        prevSemSumForYear = semSum;
+                    }
+                    row++;
+                }
+                // Итоговая строка с общим количеством вариантов (красная)
+                sheet.Cell(row, 6).Value = totalVariants;
+                var totalCell = sheet.Cell(row, 6);
+                totalCell.Style.Fill.BackgroundColor = XLColor.Red;
+                row++;
+
+                // Строка с суммой трудоемкости по всем дисциплинам (под трудоемкостью)
+                double totalWorkload = disciplines.Sum(d => excludedDisciplines.Contains(d.Name)
+                    ? d.MinValue
+                    : variant.TryGetValue(d.Id, out var val) ? val : d.MinValue);
+                sheet.Cell(row, 9).Value = totalWorkload;
+                var workloadCell = sheet.Cell(row, 9);
+                workloadCell.Style.Fill.BackgroundColor = XLColor.LightGray;
+                sheet.Cell(row, 1).Value = "Сумма трудоемкости";
+                row++;
+
+                // Строка с целевой функцией (под суммой трудоемкости)
+                sheet.Cell(row, 9).Value = objectiveValues[maxIndex];
+                var fCell = sheet.Cell(row, 9);
+                fCell.Style.Fill.BackgroundColor = XLColor.LightBlue;
+                sheet.Cell(row, 1).Value = "Целевая функция (Fц)";
+                row++;
+
+                sheet.Columns().AdjustToContents();
+                workbook.SaveAs(path);
+            }
+
+            /* Старый формат вывода всех вариантов (закомментирован)
+            using (var workbook = new ClosedXML.Excel.XLWorkbook())
+            {
+                var sheet = workbook.Worksheets.Add("Варианты");
                 sheet.Cell(1, 1).Value = "Название дисциплины";
                 sheet.Cell(1, 2).Value = "min трудоемкость";
                 sheet.Cell(1, 3).Value = "max трудоемкость";
@@ -709,7 +821,7 @@ namespace exceltabl
                     {
                         double value = excludedDisciplines.Contains(disc.Name)
                             ? disc.MinValue
-                            : variants[i].TryGetValue(disc.Id, out var val) ? val : disc.MinValue;
+                            : variants[i].TryGetValue(disc.Id, out var val) ? val : d.MinValue;
                         sheet.Cell(row, 6 + i).Value = value;
                     }
                     row++;
@@ -726,6 +838,7 @@ namespace exceltabl
                 sheet.Columns().AdjustToContents();
                 workbook.SaveAs(path);
             }
+            */
         }
 
         private bool AreDictionariesEqual(Dictionary<string, double> a, Dictionary<string, double> b)
@@ -836,4 +949,4 @@ namespace exceltabl
             };
         }
     }
-} /// в выводе 1 максимальный варианта, вывод всех не удалять, закоментировать
+} // в выводе 1 максимальный варианта, вывод всех не удалять, закоментировать
