@@ -1,11 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using ClosedXML.Excel;
-// Нужно сделать проверку суммы трудоемкости = 240 и переделать элемент проверки разницы, где значения умножаются на 10, вместо проверки на плавующую точку
+using System.IO;
 
 namespace exceltabl
 {
@@ -28,8 +28,16 @@ namespace exceltabl
         };
         private DateTime optimizationStartTime;
         private TimeSpan optimizationTimeLimit = TimeSpan.FromMinutes(5);
-        private const double StepSize = 0.5;
+        private const double StepSize = 1;
         private const double DifferenceThreshold = 1.0; // Порог разницы для оптимизации
+        // Допуски для приближённых решений
+        const double BlockTolerance = 0.01; // допустимое отклонение по блоку
+        const double GlobalTolerance = 2.0; // допустимое отклонение по общей сумме
+
+        // В классе Form1 добавим поле для хранения найденных вариантов
+        private List<Dictionary<string, double>> foundVariants = new List<Dictionary<string, double>>();
+
+        private List<double> objectiveValues = new List<double>();
 
         public Form1()
         {
@@ -44,31 +52,40 @@ namespace exceltabl
 
             dgvResult.Columns.Add(new DataGridViewTextBoxColumn()
             {
-                DataPropertyName = "Name",
-                HeaderText = "Дисциплина",
+                DataPropertyName = "Название_дисциплины",
+                HeaderText = "Название дисциплины",
                 Width = 200
             });
 
             dgvResult.Columns.Add(new DataGridViewTextBoxColumn()
             {
-                DataPropertyName = "Hours",
-                HeaderText = "Часы",
+                DataPropertyName = "min_трудоемкость",
+                HeaderText = "min трудоемкость",
                 Width = 80
             });
 
             dgvResult.Columns.Add(new DataGridViewTextBoxColumn()
             {
-                DataPropertyName = "Coefficient",
-                HeaderText = "Коэффициент",
+                DataPropertyName = "max_трудоемкость",
+                HeaderText = "max трудоемкость",
+                Width = 80
+            });
+
+            dgvResult.Columns.Add(new DataGridViewTextBoxColumn()
+            {
+                DataPropertyName = "коэф_значимости",
+                HeaderText = "коэф. значимости",
                 Width = 100
             });
 
             dgvResult.Columns.Add(new DataGridViewTextBoxColumn()
             {
-                DataPropertyName = "Semesters",
-                HeaderText = "Семестры",
+                DataPropertyName = "№_семестра",
+                HeaderText = "№ семестра",
                 Width = 150
             });
+
+
         }
 
         private void btnOpenFile_Click(object sender, EventArgs e)
@@ -85,13 +102,15 @@ namespace exceltabl
                     string filePath = openDialog.FileName;
                     lblFilePath.Text = filePath;
                     disciplines = LoadDataFromExcel(filePath);
+                    CheckForDisciplineDuplicates();
 
                     dgvResult.DataSource = disciplines.Select(d => new
                     {
-                        d.Name,
-                        Hours = $"{d.MinValue}-{d.MaxValue}",
-                        Coefficient = d.Coefficient.ToString("F3"),
-                        Semesters = string.Join(", ", d.Semesters)
+                        Название_дисциплины = d.Name,
+                        min_трудоемкость = d.MinValue,
+                        max_трудоемкость = d.MaxValue,
+                        коэф_значимости = d.Coefficient,
+                        N_семестра = string.Join(", ", d.Semesters)
                     }).ToList();
 
                     MessageBox.Show($"Загружено {disciplines.Count} дисциплин", "Успех",
@@ -112,7 +131,7 @@ namespace exceltabl
             using (var workbook = new XLWorkbook(filePath))
             {
                 var worksheet = workbook.Worksheets.First();
-                int row = 2;
+                int row = 2; // Первая строка — заголовки
 
                 while (!string.IsNullOrWhiteSpace(worksheet.Cell(row, 1).GetString()))
                 {
@@ -122,7 +141,6 @@ namespace exceltabl
                         double min = TryGetDouble(worksheet.Cell(row, 2));
                         double max = TryGetDouble(worksheet.Cell(row, 3));
                         double coeff = TryGetDouble(worksheet.Cell(row, 4));
-
                         var semestersText = worksheet.Cell(row, 5).GetString();
                         var semesters = semestersText.Split(',')
                             .Select(s => int.Parse(s.Trim()))
@@ -130,6 +148,7 @@ namespace exceltabl
 
                         result.Add(new Discipline
                         {
+                            Id = Guid.NewGuid().ToString(),
                             Name = name,
                             MinValue = min,
                             MaxValue = max,
@@ -174,41 +193,254 @@ namespace exceltabl
 
             try
             {
-                ToggleUIState(false, "Выполняется проверка и оптимизация...");
+                ToggleUIState(false, "Выполняется перебор");
+                progressBar.Style = ProgressBarStyle.Marquee;
+                progressBar.MarqueeAnimationSpeed = 30;
 
-                var optimizedSolution = await Task.Run(OptimizeSolution);
+                var blockKeys = new[] { 1, 3, 5, 7 };
+                var blockResultsList = new List<List<Dictionary<string, double>>>();
+                bool blockFail = false;
+                bool memoryError = false;
 
-                if (optimizedSolution?.Values?.Count > 0)
+                await Task.Run(() =>
                 {
-                    solution = optimizedSolution;
-
-                    dgvResult.DataSource = solution.Values.Select(kv =>
+                    try
                     {
-                        var disc = disciplines.First(d => d.Name == kv.Key);
-                        return new
+                        foreach (int semKey in blockKeys)
                         {
-                            Дисциплина = kv.Key,
-                            Часы = kv.Value.ToString("F2"),
-                            Коэффициент = disc.Coefficient.ToString("F3"),
-                            Семестры = string.Join(", ", disc.Semesters)
+                            double blockTarget = targetSums[semKey]; // 60.5, 59.5, 60, 60
+                            var blockDisciplines = disciplines
+                                .Where(d => d.Semesters.Any(s => s == semKey || s == semKey + 1))
+                                .ToList();
+
+                            // Исключённые дисциплины сразу добавляем с MinValue
+                            var path = new Dictionary<string, double>();
+                            foreach (var d in blockDisciplines.Where(d => excludedDisciplines.Contains(d.Name)))
+                                path[d.Id] = d.MinValue;
+
+                            // Оставшиеся дисциплины для подбора блока
+                            var blockDisciplinesForBlock = blockDisciplines.Where(d => !excludedDisciplines.Contains(d.Name)).ToList();
+
+                            // Ограничиваем количество гибких дисциплин до 10
+                            var flexible = blockDisciplinesForBlock
+                                .OrderByDescending(d => d.MaxValue - d.MinValue)
+                                .Take(13)
+                                .ToList();
+                            var fixedDiscs = blockDisciplinesForBlock.Except(flexible).ToList();
+
+                            foreach (var d in fixedDiscs)
+                                path[d.Id] = d.MinValue;
+                            // fixedSum только по не-исключённым дисциплинам!
+                            double fixedSum = fixedDiscs.Sum(d => d.MinValue);
+
+                            var blockResult = new List<Dictionary<string, double>>();
+                            GenerateCombinationsApproximate(flexible, blockTarget, fixedSum, 0, path, blockResult);
+
+                            if (blockResult.Count == 0)
+                            {
+                                blockFail = true;
+                                break;
+                            }
+
+                            blockResultsList.Add(blockResult);
+                        }
+                    }
+                    catch (OutOfMemoryException)
+                    {
+                        memoryError = true;
+                    }
+                });
+
+                if (memoryError)
+                {
+                    MessageBox.Show($"Перебор остановлен из-за нехватки памяти. Найдено {foundVariants?.Count ?? 0} вариантов. Для сохранения используйте кнопку 'Сохранить'.", "Внимание", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    progressBar.Style = ProgressBarStyle.Blocks;
+                    ToggleUIState(true, "Готово");
+                    return;
+                }
+
+                if (blockFail)
+                {
+                    MessageBox.Show("Не найдено решений хотя бы для одного из блоков.", "Результат", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    foundVariants = new List<Dictionary<string, double>>();
+                    return;
+                }
+
+                // Генерируем все возможные комбинации
+                int blocks = blockResultsList.Count;
+                int[] counts = blockResultsList.Select(l => l.Count).ToArray();
+                const int MaxFinalVariants = 1000; // Ограничение на количество итоговых вариантов
+
+                foundVariants = new List<Dictionary<string, double>>();
+                try
+                {
+                    void GenerateAndProcess(int[] indices, int depth)
+                    {
+                        if (foundVariants.Count >= MaxFinalVariants)
+                            return;
+                        if (depth == blocks)
+                        {
+                            var finalVariant = new Dictionary<string, double>();
+                            for (int b = 0; b < blocks; b++)
+                            {
+                                var block = blockResultsList[b][indices[b]];
+                                foreach (var kv in block)
+                                {
+                                    if (!finalVariant.ContainsKey(kv.Key))
+                                        finalVariant[kv.Key] = 0;
+                                    finalVariant[kv.Key] += kv.Value;
+                                }
+                            }
+                            if (!foundVariants.Any(existing => AreDictionariesEqual(existing, finalVariant)))
+                                foundVariants.Add(finalVariant);
+                            return;
+                        }
+                        for (int i = 0; i < counts[depth]; i++)
+                        {
+                            indices[depth] = i;
+                            GenerateAndProcess(indices, depth + 1);
+                            if (foundVariants.Count >= MaxFinalVariants)
+                                break;
+                        }
+                    }
+
+                    GenerateAndProcess(new int[blocks], 0);
+
+                    // Вычисляем целевую функцию для каждого варианта
+                    objectiveValues = new List<double>();
+                    foreach (var variant in foundVariants)
+                    {
+                        double product = 1.0;
+                        for (int sem = 1; sem <= 8; sem++)
+                        {
+                            double sum = 0.0;
+                            foreach (var kv in variant)
+                            {
+                                var disc = disciplines.First(d => d.Id == kv.Key);
+                                if (disc.Semesters.Contains(sem))
+                                {
+                                    sum += disc.Coefficient * kv.Value;
+                                }
+                            }
+                            product *= sum;
+                        }
+                        objectiveValues.Add(product);
+                    }
+
+                    // Сортируем варианты по значению целевой функции
+                    var sortedVariants = foundVariants
+                        .Zip(objectiveValues, (v, f) => new { Variant = v, Objective = f })
+                        .OrderByDescending(x => x.Objective)
+                        .ToList();
+
+                    // Обновляем foundVariants отсортированными вариантами
+                    foundVariants = sortedVariants.Select(x => x.Variant).ToList();
+
+                    var allDisciplineIds = disciplines.Select(d => d.Id).ToList();
+                    var table = allDisciplineIds.Select(id =>
+                    {
+                        var disc = disciplines.First(d => d.Id == id);
+                        var row = new Dictionary<string, object>
+                        {
+                            ["Название_дисциплины"] = disc.Name,
+                            ["min_трудоемкость"] = disc.MinValue,
+                            ["max_трудоемкость"] = disc.MaxValue,
+                            ["коэф_значимости"] = disc.Coefficient,
+                            ["N_семестра"] = string.Join(", ", disc.Semesters)
                         };
+                        for (int i = 0; i < foundVariants.Count; i++)
+                        {
+                            double value = excludedDisciplines.Contains(disc.Name)
+                                ? disc.MinValue
+                                : foundVariants[i].TryGetValue(id, out var val) ? val : disc.MinValue;
+                            row[$"Fц={sortedVariants[i].Objective:F2}"] = value;
+                        }
+                        return row;
                     }).ToList();
 
-                    ShowOptimizationSummary(optimizedSolution);
+                    // Добавляем строку с суммой
+                    var sumRow = new Dictionary<string, object>
+                    {
+                        ["Название_дисциплины"] = "Сумма",
+                        ["min_трудоемкость"] = 0.0,
+                        ["max_трудоемкость"] = 0.0,
+                        ["коэф_значимости"] = 0.0,
+                        ["N_семестра"] = ""
+                    };
+
+                    // Суммы по семестрам
+                    for (int sem = 1; sem <= 8; sem++)
+                    {
+                        sumRow[$"Семестр_{sem}"] = 0.0;
+                    }
+
+                    // Итоговые суммы по вариантам (по всем дисциплинам)
+                    for (int i = 0; i < foundVariants.Count; i++)
+                    {
+                        double sum = disciplines
+                            .Sum(d => foundVariants[i].TryGetValue(d.Id, out var val) ? val : d.MinValue);
+                        sumRow[$"Fц={sortedVariants[i].Objective:F2}"] = sum;
+                    }
+                    table.Add(sumRow);
+
+                    dgvResult.DataSource = table.Select(x => x.ToDictionary(
+                        kv => kv.Key,
+                        kv => kv.Value is double d ? d.ToString("F2") : kv.Value.ToString()
+                    )).ToList();
+
+                    // После формирования foundVariants и перед выводом/сохранением
+                    // Проверим сумму MinValue по excludedDisciplines и выведем предупреждение, если итог не 244
+                    double excludedSumCheck = disciplines
+                        .Where(d => excludedDisciplines.Contains(d.Name))
+                        .Sum(d => d.MinValue);
+                    double blockTargetSum = targetSums.Values.Sum(); // 240
+                    double expectedTotal = blockTargetSum + excludedSumCheck;
+                    if (Math.Abs(expectedTotal - 244.0) > 0.01)
+                    {
+                        MessageBox.Show($"Внимание! Сумма по блокам: {blockTargetSum}, сумма по исключённым дисциплинам: {excludedSumCheck}, итоговая сумма: {expectedTotal}.\nОжидается 244. Проверьте targetSums и MinValue исключённых дисциплин.", "Контроль суммы", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+
+                    MessageBox.Show($"Найдено {foundVariants.Count} уникальных вариантов. Для сохранения используйте кнопку 'Сохранить'.", "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+                    // Добавляем исключённые дисциплины с MinValue в каждый вариант
+                    foreach (var variant in foundVariants)
+                    {
+                        foreach (var d in disciplines.Where(d => excludedDisciplines.Contains(d.Name)))
+                        {
+                            variant[d.Id] = d.MinValue;
+                        }
+                    }
+
+                    if (foundVariants.Count > 0)
+                    {
+                        var variant = foundVariants[0];
+                        double block1 = disciplines.Where(d => !excludedDisciplines.Contains(d.Name) && (d.Semesters.Contains(1) || d.Semesters.Contains(2)))
+                            .Sum(d => variant.TryGetValue(d.Id, out var val) ? val : d.MinValue);
+                        double block2 = disciplines.Where(d => !excludedDisciplines.Contains(d.Name) && (d.Semesters.Contains(3) || d.Semesters.Contains(4)))
+                            .Sum(d => variant.TryGetValue(d.Id, out var val) ? val : d.MinValue);
+                        double block3 = disciplines.Where(d => !excludedDisciplines.Contains(d.Name) && (d.Semesters.Contains(5) || d.Semesters.Contains(6)))
+                            .Sum(d => variant.TryGetValue(d.Id, out var val) ? val : d.MinValue);
+                        double block4 = disciplines.Where(d => !excludedDisciplines.Contains(d.Name) && (d.Semesters.Contains(7) || d.Semesters.Contains(8)))
+                            .Sum(d => variant.TryGetValue(d.Id, out var val) ? val : d.MinValue);
+                        double excludedSum = disciplines.Where(d => excludedDisciplines.Contains(d.Name))
+                            .Sum(d => variant.TryGetValue(d.Id, out var val) ? val : d.MinValue);
+                        double total = block1 + block2 + block3 + block4 + excludedSum;
+                        MessageBox.Show($"Диагностика суммы для первого варианта:\n" +
+                            $"Блок 1+2: {block1}\nБлок 3+4: {block2}\nБлок 5+6: {block3}\nБлок 7+8: {block4}\n" +
+                            $"Excluded: {excludedSum}\nИтого: {total}", "Диагностика суммы");
+                    }
                 }
-                else
+                catch (OutOfMemoryException)
                 {
-                    MessageBox.Show("Не удалось найти допустимое решение", "Результат",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show($"Перебор остановлен из-за нехватки памяти на этапе генерации комбинаций. Найдено {foundVariants?.Count ?? 0} вариантов. Для сохранения используйте кнопку 'Сохранить'.", "Внимание", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    progressBar.Style = ProgressBarStyle.Blocks;
+                    ToggleUIState(true, "Готово");
+                    return;
                 }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Ошибка оптимизации: {ex.Message}", "Ошибка",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
+                progressBar.Style = ProgressBarStyle.Blocks;
                 ToggleUIState(true, "Готово");
             }
         }
@@ -223,7 +455,10 @@ namespace exceltabl
 
         private void ShowOptimizationSummary(Solution solution)
         {
-            var differences = CalculateDifferences(solution);
+            if (!solution.Combinations.Any())
+                return;
+
+            var differences = solution.Combinations[0].Differences;
             var diffMessage = string.Join("\n", differences.Select(d =>
                 $"Семестры {d.Key}-{d.Key + 1}: разница {d.Value:F2} ч."));
 
@@ -233,313 +468,184 @@ namespace exceltabl
                 "Результат", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        private Solution OptimizeSolution()
+        private void CheckForDisciplineDuplicates()
         {
-            optimizationStartTime = DateTime.Now;
-
-            var filteredDisciplines = disciplines
-                .Where(d => !excludedDisciplines.Contains(d.Name))
+            var duplicateGroups = disciplines
+                .GroupBy(d => d.Name)
+                .Where(g => g.Count() > 1)
                 .ToList();
-
-            // Создаем начальное решение с минимальными значениями
-            var initialSolution = new Solution();
-            foreach (var disc in filteredDisciplines)
+            foreach (var group in duplicateGroups)
             {
-                initialSolution.Values[disc.Name] = disc.MinValue;
-            }
-
-            // Проверяем разницу между текущими и целевыми значениями
-            var differences = CalculateDifferences(initialSolution);
-
-            // Оптимизируем только если есть превышения (разница > 0)
-            bool needsOptimization =
-                !CheckSemesterConstraintsInt(initialSolution, 1) ||
-                !CheckSemesterConstraintsDouble(initialSolution, DifferenceThreshold);
-
-            if (!needsOptimization)
-            {
-                initialSolution.Value = CalculateObjectiveFunction(initialSolution);
-                return initialSolution;
-            }
-
-            // Если есть превышения — пытаемся оптимизировать
-            var greedySolution = TryGreedyApproach(filteredDisciplines);
-            if (greedySolution != null && CheckSemesterConstraints(greedySolution))
-            {
-                greedySolution.Value = CalculateObjectiveFunction(greedySolution);
-                return greedySolution;
-            }
-
-            return RunSimulatedAnnealing(filteredDisciplines);
-        }
-
-        private Dictionary<int, double> CalculateDifferences(Solution solution)
-        {
-            var semesterLoad = new Dictionary<int, double>();
-
-            // Проходим по всем дисциплинам и распределяем часы по семестрам
-            foreach (var kvp in solution.Values)
-            {
-                var discipline = disciplines.FirstOrDefault(d => d.Name == kvp.Key);
-                if (discipline == null) continue;
-
-                // Для каждой дисциплины распределяем часы по семестрам
-                foreach (int semester in discipline.Semesters)
+                // Проверяем, есть ли среди "дубликатов" различие по семестрам или другим параметрам
+                var uniqueVariants = group.Select(d => $"{string.Join(",", d.Semesters)}|{d.MinValue}|{d.MaxValue}|{d.Coefficient}").Distinct().Count();
+                if (uniqueVariants > 1)
                 {
-                    if (!semesterLoad.ContainsKey(semester))
-                        semesterLoad[semester] = 0;
-
-                    semesterLoad[semester] += kvp.Value / discipline.Semesters.Length;
+                    // Это не дубликаты, а разные дисциплины с одинаковым названием
+                    // Можно вывести предупреждение в лог или для разработчика
+                    System.Diagnostics.Debug.WriteLine($"Внимание: дисциплина '{group.Key}' встречается несколько раз с разными параметрами. Это ОК!");
                 }
             }
+        }
 
-            var differences = new Dictionary<int, double>();
-            var semesters = semesterLoad.Keys.OrderBy(k => k).ToList();
+        // Чистый рекурсивный перебор по всем дисциплинам от min до max с шагом 0.5
+       
 
-            // Считаем разницу между нагрузками на соседние семестры
-            for (int i = 0; i < semesters.Count - 1; i++)
+        private void StrictRecursiveSearch(List<Discipline> disciplines, int index, Dictionary<string, double> current, List<Dictionary<string, double>> results)
+        {
+            if (index == disciplines.Count)
+            {
+                if (IsValidCombination(current))
+                    results.Add(new Dictionary<string, double>(current));
+                return;
+            }
+            var disc = disciplines[index];
+            for (double val = disc.MinValue; val <= disc.MaxValue + 0.0001; val += 0.25)
+            {
+                current[disc.Id] = val;
+                StrictRecursiveSearch(disciplines, index + 1, current, results);
+                current.Remove(disc.Id);
+            }
+        }
+
+        // Проверка полной комбинации
+        private bool IsValidCombination(Dictionary<string, double> combination)
+        {
+            // 1. Проверка суммы по парам семестров (без исключённых дисциплин)
+            var targetSums = new Dictionary<int, double> { { 1, 60.5 }, { 3, 59.5 }, { 5, 60.0 }, { 7, 60.0 } };
+            foreach (var target in targetSums)
+            {
+                double sum = 0;
+                foreach (var kv in combination)
+                {
+                    var disc = disciplines.First(d => d.Id == kv.Key);
+                    if (excludedDisciplines.Contains(disc.Name)) continue;
+                    if (disc.Semesters.Contains(target.Key) || disc.Semesters.Contains(target.Key + 1))
+                        sum += kv.Value;
+                }
+                if (Math.Abs(sum - target.Value) > 0.01) return false;
+            }
+            // 2. Проверка разницы по семестрам (все дисциплины)
+            var semesterLoad = new Dictionary<int, double>();
+            foreach (var kv in combination)
+            {
+                var disc = disciplines.First(d => d.Id == kv.Key);
+                foreach (var sem in disc.Semesters)
+                {
+                    if (!semesterLoad.ContainsKey(sem)) semesterLoad[sem] = 0;
+                    semesterLoad[sem] += kv.Value / disc.Semesters.Length;
+                }
+            }
+            var semesters = semesterLoad.Keys.OrderBy(x => x).ToList();
+            for (int i = 0; i < semesters.Count - 1; i += 2)
             {
                 int s1 = semesters[i];
                 int s2 = semesters[i + 1];
-                differences[s1] = Math.Abs(semesterLoad[s1] - semesterLoad[s2]);
+                if (Math.Abs(semesterLoad[s1] - semesterLoad[s2]) > 6.0) return false;
             }
-
-            return differences;
-        }
-
-
-
-        private Dictionary<int, double> CalculateSemesterTotals(Solution solution)
-        {
-            var semesterGroups = solution.Values
-                .SelectMany(kv => disciplines.First(d => d.Name == kv.Key).Semesters
-                    .Select(sem => new { Semester = sem, Hours = kv.Value }))
-                .GroupBy(x => (x.Semester - 1) / 2 * 2 + 1)
-                .ToDictionary(g => g.Key, g => g.Sum(x => x.Hours));
-
-            return semesterGroups;
-        }
-
-        private Solution TryGreedyApproach(List<Discipline> filteredDisciplines)
-        {
-            var solution = new Solution();
-            var random = new Random();
-
-            // Начинаем с минимальных значений
-            foreach (var disc in filteredDisciplines)
-            {
-                solution.Values[disc.Name] = disc.MinValue;
-            }
-
-            // Распределяем оставшиеся часы
-            double remainingHours = CalculateRemainingHours(solution);
-
-            while (remainingHours > 0)
-            {
-                var available = filteredDisciplines
-                    .Where(d => solution.Values[d.Name] < d.MaxValue)
-                    .OrderByDescending(d => d.Coefficient)
-                    .ToList();
-
-                if (!available.Any()) break;
-
-                double totalCoeff = available.Sum(d => d.Coefficient);
-                foreach (var disc in available)
-                {
-                    double share = disc.Coefficient / totalCoeff;
-                    double toAdd = Math.Min(remainingHours * share, disc.MaxValue - solution.Values[disc.Name]);
-                    solution.Values[disc.Name] += toAdd;
-                    remainingHours -= toAdd;
-
-                    if (remainingHours <= 0) break;
-                }
-            }
-
-            return CheckSemesterConstraints(solution) ? solution : null;
-        }
-
-        private double CalculateRemainingHours(Solution solution)
-        {
-            double totalAssigned = solution.Values.Sum(kv => kv.Value);
-            double totalRequired = targetSums.Sum(ts => ts.Value);
-            return totalRequired - totalAssigned;
-        }
-
-        private Solution RunSimulatedAnnealing(List<Discipline> filteredDisciplines)
-        {
-            var current = new Solution();
-            foreach (var disc in filteredDisciplines)
-            {
-                current.Values[disc.Name] = disc.MinValue;
-            }
-            current.Value = CalculateObjectiveFunction(current);
-
-            var best = current.Clone();
-            double temperature = 1000;
-            double coolingRate = 0.003;
-            var random = new Random();
-
-            while (temperature > 1 && DateTime.Now - optimizationStartTime < optimizationTimeLimit)
-            {
-                var neighbor = current.Clone();
-
-                int changes = random.Next(1, 5);
-                for (int i = 0; i < changes; i++)
-                {
-                    var disc = filteredDisciplines[random.Next(filteredDisciplines.Count)];
-                    double newValue = Math.Max(disc.MinValue,
-                        Math.Min(disc.MaxValue,
-                            neighbor.Values[disc.Name] + (random.NextDouble() - 0.5) * StepSize * 2));
-                    neighbor.Values[disc.Name] = newValue;
-                }
-
-                if (CheckSemesterConstraints(neighbor))
-                {
-                    neighbor.Value = CalculateObjectiveFunction(neighbor);
-                    double delta = neighbor.Value - current.Value;
-
-                    if (delta > 0 || random.NextDouble() < Math.Exp(delta / temperature))
-                    {
-                        current = neighbor;
-
-                        if (current.Value > best.Value)
-                        {
-                            best = current.Clone();
-                        }
-                    }
-                }
-
-                temperature *= 1 - coolingRate;
-            }
-
-            return best.Value > 0 ? best : null;
-        }
-
-        private bool CheckSemesterConstraints(Solution solution)
-        {
-            var semesterTotals = CalculateSemesterTotals(solution);
-
-            foreach (var target in targetSums)
-            {
-                if (!semesterTotals.ContainsKey(target.Key)) continue;
-
-                double currentSum = semesterTotals[target.Key];
-                if (Math.Abs(currentSum - target.Value) > DifferenceThreshold * 2) // Более строгая проверка при оптимизации
-                {
-                    return false;
-                }
-            }
-
-            foreach (var kv in solution.Values)
-            {
-                var disc = disciplines.First(d => d.Name == kv.Key);
-                if (kv.Value < disc.MinValue || kv.Value > disc.MaxValue)
-                {
-                    return false;
-                }
-            }
-
+            // 3. Общая сумма (только по дисциплинам без исключений)
+            double total = disciplines
+                .Where(d => !excludedDisciplines.Contains(d.Name))
+                .Sum(d => combination.TryGetValue(d.Id, out var val) ? val : d.MinValue);
+            if (Math.Abs(total - 240.0) > 0.01) return false;
             return true;
         }
-
-        private double CalculateObjectiveFunction(Solution solution)
+        // Сохранение одной комбинации в Excel
+        private void SaveCombinationToExcel(Dictionary<string, double> combination, string fileName, int variantIndex = 1, int totalVariants = 1)
         {
-            double totalValue = 0;
-            foreach (var item in solution.Values)
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string path = Path.Combine(desktop, fileName);
+            using (var workbook = new ClosedXML.Excel.XLWorkbook())
             {
-                var discipline = disciplines.First(d => d.Name == item.Key);
-                totalValue += item.Value * discipline.Coefficient;
-            }
-            return totalValue;
-        }
-
-        private void SaveResultsToExcel(string filePath)
-        {
-            using (var workbook = new XLWorkbook())
-            {
-                var sheet = workbook.Worksheets.Add("Результаты");
-
-                // Заголовки
-                sheet.Cell(1, 1).Value = "Дисциплина";
-                sheet.Cell(1, 2).Value = "Часы";
-                sheet.Cell(1, 3).Value = "Коэффициент";
-                sheet.Cell(1, 4).Value = "Семестры";
-                sheet.Cell(1, 5).Value = "Разница по семестрам";
-
-                var differences = CalculateDifferences(solution);
-                int row = 2;
-
-                foreach (var item in solution.Values)
+                var sheet = workbook.Worksheets.Add("Вариант");
+                sheet.Cell(1, 1).Value = "Название дисциплины";
+                sheet.Cell(1, 2).Value = "min трудоемкость";
+                sheet.Cell(1, 3).Value = "max трудоемкость";
+                sheet.Cell(1, 4).Value = "коэф. значимости";
+                sheet.Cell(1, 5).Value = "№ семестра";
+                // Если вариантов больше одного, делаем столбцы Трудоемкость 1, 2, ...
+                for (int i = 0; i < totalVariants; i++)
                 {
-                    var discipline = disciplines.First(d => d.Name == item.Key);
-                    double assigned = item.Value;
-
-                    sheet.Cell(row, 1).Value = item.Key;
-                    sheet.Cell(row, 2).Value = assigned;
-                    sheet.Cell(row, 3).Value = discipline.Coefficient;
-                    sheet.Cell(row, 4).Value = string.Join(", ", discipline.Semesters);
-
-                    // Разница по семестрам (внешняя)
-                    string diffInfo = string.Join("; ", discipline.Semesters
-                        .Select(s => (s - 1) / 2 * 2 + 1)
-                        .Distinct()
-                        .Select(s =>
-                        {
-                            differences.TryGetValue(s, out double diff);
-                            return $"Сем.{s}-{s + 1}: {diff:F2}";
-                        }));
-
-                    sheet.Cell(row, 5).Value = diffInfo;
-
-                    // Форматирование
-                    sheet.Cell(row, 2).Style.NumberFormat.Format = "0.00";
-                    sheet.Cell(row, 3).Style.NumberFormat.Format = "0.000";
-
-                    // Выделяем зелёным, если есть разница между Min и Max (даже если assigned == MinValue)
-                    if (discipline.MaxValue > discipline.MinValue)
-                    {
-                        var range = sheet.Range(row, 1, row, 5);
-                        range.Style.Fill.BackgroundColor = XLColor.LightGreen;
-                    }
-
+                    sheet.Cell(1, 6 + i).Value = $"Трудоемкость {i + 1}";
+                }
+                int row = 2;
+                double sum = 0;
+                foreach (var kv in combination)
+                {
+                    var disc = disciplines.First(d => d.Id == kv.Key);
+                    sheet.Cell(row, 1).Value = disc.Name;
+                    sheet.Cell(row, 2).Value = disc.MinValue;
+                    sheet.Cell(row, 3).Value = disc.MaxValue;
+                    sheet.Cell(row, 4).Value = disc.Coefficient;
+                    sheet.Cell(row, 5).Value = string.Join(", ", disc.Semesters);
+                    // Заполняем только нужный столбец для этого варианта
+                    double value = excludedDisciplines.Contains(disc.Name)
+                        ? disc.MinValue
+                        : (kv.Value);
+                    sheet.Cell(row, 6 + variantIndex - 1).Value = value;
+                    sum += value;
                     row++;
                 }
-
+                // Добавляем строку с суммой
+                sheet.Cell(row, 1).Value = "Сумма";
+                sheet.Cell(row, 6 + variantIndex - 1).Value = sum;
                 sheet.Columns().AdjustToContents();
-                workbook.SaveAs(filePath);
+                workbook.SaveAs(path);
             }
-        }
-        private bool CheckSemesterConstraintsInt(Solution solution, int tolerance = 1)
-        {
-            var semesterTotals = CalculateSemesterTotals(solution);
-            foreach (var target in targetSums)
-            {
-                if (!semesterTotals.ContainsKey(target.Key)) continue;
-                double currentSum = semesterTotals[target.Key];
-                if (Math.Abs(currentSum - target.Value) > tolerance)
-                    return false;
-            }
-            return true;
         }
 
-        private bool CheckSemesterConstraintsDouble(Solution solution, double tolerance = 1.0)
+        // Генерация приближённых комбинаций для блока
+        private void GenerateCombinationsApproximate(
+            List<Discipline> arr,
+            double target_sum,
+            double curr_sum,
+            int index,
+            Dictionary<string, double> path,
+            List<Dictionary<string, double>> result)
         {
-            var semesterTotals = CalculateSemesterTotals(solution);
-            foreach (var target in targetSums)
+            if (curr_sum > target_sum + BlockTolerance)
+                return;
+
+            if (index == arr.Count)
             {
-                if (!semesterTotals.ContainsKey(target.Key)) continue;
-                double currentSum = semesterTotals[target.Key];
-                if (Math.Abs(currentSum - target.Value) > tolerance)
-                    return false;
+                if (Math.Abs(curr_sum - target_sum) <= BlockTolerance)
+                {
+                    result.Add(new Dictionary<string, double>(path));
+                }
+                return;
             }
+
+            var disc = arr[index];
+            var valuesToTry = new List<double> { disc.MinValue, disc.MaxValue };
+            for (double val = disc.MinValue + 1.0; val < disc.MaxValue; val += 1.0)
+            {
+                if (!valuesToTry.Contains(val))
+                    valuesToTry.Add(val);
+            }
+            valuesToTry.Sort();
+
+            foreach (double val in valuesToTry)
+            {
+                if (curr_sum + val > target_sum + BlockTolerance)
+                    continue;
+
+                path[disc.Id] = val;
+                GenerateCombinationsApproximate(arr, target_sum, curr_sum + val, index + 1, path, result);
+                path.Remove(disc.Id);
+            }
+        }
+
+        // Итоговая проверка с допуском
+        private bool IsApproximateCombination(Dictionary<string, double> combination)
+        {
+            // Все проверки убраны — всегда возвращаем true
             return true;
         }
 
         private void btnSave_Click(object sender, EventArgs e)
         {
-            if (solution == null || solution.Values == null || solution.Values.Count == 0)
+            if (foundVariants == null || foundVariants.Count == 0)
             {
-                MessageBox.Show("Сначала выполните оптимизацию и дождитесь её завершения", "Ошибка",
+                MessageBox.Show("Сначала выполните поиск комбинаций", "Ошибка",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -554,7 +660,7 @@ namespace exceltabl
             {
                 try
                 {
-                    SaveResultsToExcel(saveDialog.FileName);
+                    SaveAllCombinationsToExcel(foundVariants, objectiveValues, saveDialog.FileName);
                     MessageBox.Show("Результаты успешно сохранены", "Успех",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
@@ -565,10 +671,128 @@ namespace exceltabl
                 }
             }
         }
+
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            // Инициализация формы при загрузке
+        }
+
+        private void SaveAllCombinationsToExcel(List<Dictionary<string, double>> variants, List<double> objectiveValues, string fileName)
+        {
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string path = Path.Combine(desktop, fileName);
+            using (var workbook = new ClosedXML.Excel.XLWorkbook())
+            {
+                var sheet = workbook.Worksheets.Add("Варианты");
+                sheet.Cell(1, 1).Value = "Название дисциплины";
+                sheet.Cell(1, 2).Value = "min трудоемкость";
+                sheet.Cell(1, 3).Value = "max трудоемкость";
+                sheet.Cell(1, 4).Value = "коэф. значимости";
+                sheet.Cell(1, 5).Value = "№ семестра";
+                for (int i = 0; i < variants.Count; i++)
+                {
+                    sheet.Cell(1, 6 + i).Value = $"Fц={objectiveValues[i]:F2}";
+                }
+                int row = 2;
+                // Сначала обычные дисциплины
+                foreach (var disc in disciplines)
+                {
+                    sheet.Cell(row, 1).Value = disc.Name;
+                    sheet.Cell(row, 2).Value = disc.MinValue;
+                    sheet.Cell(row, 3).Value = disc.MaxValue;
+                    sheet.Cell(row, 4).Value = disc.Coefficient;
+                    sheet.Cell(row, 5).Value = string.Join(", ", disc.Semesters);
+                    for (int i = 0; i < variants.Count; i++)
+                    {
+                        double value = excludedDisciplines.Contains(disc.Name)
+                            ? disc.MinValue
+                            : variants[i].TryGetValue(disc.Id, out var val) ? val : disc.MinValue;
+                        sheet.Cell(row, 6 + i).Value = value;
+                    }
+                    row++;
+                }
+                // Строка с суммой по всем дисциплинам
+                sheet.Cell(row, 1).Value = "Сумма";
+                for (int i = 0; i < variants.Count; i++)
+                {
+                    double sum = disciplines
+                        .Sum(d => variants[i].TryGetValue(d.Id, out var val) ? val : d.MinValue);
+                    sheet.Cell(row, 6 + i).Value = sum;
+                }
+                row++;
+                sheet.Columns().AdjustToContents();
+                workbook.SaveAs(path);
+            }
+        }
+
+        private bool AreDictionariesEqual(Dictionary<string, double> a, Dictionary<string, double> b)
+        {
+            if (a.Count != b.Count) return false;
+            foreach (var kv in a)
+            {
+                if (!b.TryGetValue(kv.Key, out var val) || Math.Abs(val - kv.Value) > 0.0001)
+                    return false;
+            }
+            return true;
+        }
+
+        private void button_max_Click(object sender, EventArgs e)
+        {
+            if (foundVariants == null || foundVariants.Count == 0)
+            {
+                MessageBox.Show("Сначала выполните поиск комбинаций", "Ошибка",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Запросить у пользователя файл для выделения
+            OpenFileDialog openDialog = new OpenFileDialog
+            {
+                Filter = "Excel Files|*.xlsx",
+                Title = "Выберите файл с вариантами для выделения максимального"
+            };
+
+            if (openDialog.ShowDialog() != DialogResult.OK)
+                return;
+
+            // Открываем файл и выделяем нужный столбец
+            using (var workbook = new ClosedXML.Excel.XLWorkbook(openDialog.FileName))
+            {
+                var sheet = workbook.Worksheet(1);
+                int maxCol = -1;
+                double maxF = double.MinValue;
+                int lastCol = sheet.LastColumnUsed().ColumnNumber();
+                // Ищем столбец с максимальным значением Fц в заголовке
+                for (int col = 6; col <= lastCol; col++)
+                {
+                    var header = sheet.Cell(1, col).GetString();
+                    if (header.StartsWith("Fц="))
+                    {
+                        if (double.TryParse(header.Substring(3), out double f) && f > maxF)
+                        {
+                            maxF = f;
+                            maxCol = col;
+                        }
+                    }
+                }
+                if (maxCol > 0)
+                {
+                    var headerCell = sheet.Cell(1, maxCol);
+                    headerCell.Style.Fill.BackgroundColor = XLColor.Yellow;
+                    workbook.Save();
+                    MessageBox.Show($"Максимальное значение Fц = {maxF:F2} (столбец {headerCell.Address.ColumnLetter}). Заголовок выделен цветом.", "Результат", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else
+                {
+                    MessageBox.Show("Не удалось найти столбец с максимальным значением Fц.", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+        }
     }
 
     public class Discipline
     {
+        public string Id { get; set; }
         public string Name { get; set; }
         public double MinValue { get; set; }
         public double MaxValue { get; set; }
@@ -576,18 +800,37 @@ namespace exceltabl
         public int[] Semesters { get; set; }
     }
 
-    public class Solution
+    public class WorkloadCombination
     {
         public Dictionary<string, double> Values { get; set; } = new Dictionary<string, double>();
+        public double TotalValue { get; set; }
+        public Dictionary<int, double> SemesterTotals { get; set; } = new Dictionary<int, double>();
+        public Dictionary<int, double> Differences { get; set; } = new Dictionary<int, double>();
+
+        public WorkloadCombination Clone()
+        {
+            return new WorkloadCombination
+            {
+                Values = new Dictionary<string, double>(Values),
+                TotalValue = TotalValue,
+                SemesterTotals = new Dictionary<int, double>(SemesterTotals),
+                Differences = new Dictionary<int, double>(Differences)
+            };
+        }
+    }
+
+    public class Solution
+    {
+        public List<WorkloadCombination> Combinations { get; set; } = new List<WorkloadCombination>();
         public double Value { get; set; }
 
         public Solution Clone()
         {
             return new Solution
             {
-                Values = new Dictionary<string, double>(Values),
+                Combinations = Combinations.Select(c => c.Clone()).ToList(),
                 Value = Value
             };
         }
     }
-}
+} // в выводе 1 максимальный варианта, вывод всех не удалять, закоментировать
