@@ -23,7 +23,10 @@ namespace exceltabl
             this.progressBar = new System.Windows.Forms.ProgressBar();
             this.lblStatus = new System.Windows.Forms.Label();
             this.button_max = new System.Windows.Forms.Button();
+            this.chkAllVariants = new System.Windows.Forms.CheckBox();
+            this.numVariants = new System.Windows.Forms.NumericUpDown();
             ((System.ComponentModel.ISupportInitialize)(this.dgvResult)).BeginInit();
+            ((System.ComponentModel.ISupportInitialize)(this.numVariants)).BeginInit();
             this.SuspendLayout();
             // 
             // dgvResult
@@ -106,11 +109,45 @@ namespace exceltabl
             this.button_max.UseVisualStyleBackColor = true;
             this.button_max.Click += new System.EventHandler(this.button_max_Click);
             // 
+            // chkAllVariants
+            // 
+            this.chkAllVariants.Location = new System.Drawing.Point(680, 515);
+            this.chkAllVariants.Name = "chkAllVariants";
+            this.chkAllVariants.Size = new System.Drawing.Size(140, 24);
+            this.chkAllVariants.Text = "Все варианты";
+            this.chkAllVariants.Checked = true;
+            this.chkAllVariants.UseVisualStyleBackColor = true;
+            this.chkAllVariants.CheckedChanged += new System.EventHandler(this.chkAllVariants_CheckedChanged);
+            // 
+            // numVariants
+            // 
+            this.numVariants.Location = new System.Drawing.Point(830, 515);
+            this.numVariants.Minimum = new decimal(new int[] {
+            1,
+            0,
+            0,
+            0});
+            this.numVariants.Maximum = new decimal(new int[] {
+            10000,
+            0,
+            0,
+            0});
+            this.numVariants.Name = "numVariants";
+            this.numVariants.Size = new System.Drawing.Size(60, 22);
+            this.numVariants.Value = new decimal(new int[] {
+            1000,
+            0,
+            0,
+            0});
+            this.numVariants.Enabled = false;
+            // 
             // Form1
             // 
             this.AutoScaleDimensions = new System.Drawing.SizeF(8F, 16F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(1045, 567);
+            this.Controls.Add(this.numVariants);
+            this.Controls.Add(this.chkAllVariants);
             this.Controls.Add(this.button_max);
             this.Controls.Add(this.lblStatus);
             this.Controls.Add(this.progressBar);
@@ -124,9 +161,9 @@ namespace exceltabl
             this.Text = "Оптимизатор учебной нагрузки";
             this.Load += new System.EventHandler(this.Form1_Load);
             ((System.ComponentModel.ISupportInitialize)(this.dgvResult)).EndInit();
+            ((System.ComponentModel.ISupportInitialize)(this.numVariants)).EndInit();
             this.ResumeLayout(false);
             this.PerformLayout();
-
         }
 
         private System.Windows.Forms.DataGridView dgvResult;
@@ -137,5 +174,7 @@ namespace exceltabl
         private System.Windows.Forms.ProgressBar progressBar;
         private System.Windows.Forms.Label lblStatus;
         private System.Windows.Forms.Button button_max;
+        private System.Windows.Forms.CheckBox chkAllVariants;
+        private System.Windows.Forms.NumericUpDown numVariants;
     }
 }
