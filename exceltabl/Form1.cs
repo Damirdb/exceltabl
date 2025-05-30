@@ -32,12 +32,18 @@ namespace exceltabl
         private const double DifferenceThreshold = 1.0; // Порог разницы для оптимизации
         // Допуски для приближённых решений
         const double BlockTolerance = 0.01; // допустимое отклонение по блоку
-        const double GlobalTolerance = 2.0; // допустимое отклонение по общей сумме
 
         // В классе Form1 добавим поле для хранения найденных вариантов
         private List<Dictionary<string, double>> foundVariants = new List<Dictionary<string, double>>();
 
         private List<double> objectiveValues = new List<double>();
+
+        private int MaxVariantsToFind = 1000;
+
+        private void chkAllVariants_CheckedChanged(object sender, EventArgs e)
+        {
+            numVariants.Enabled = !chkAllVariants.Checked;
+        }
 
         public Form1()
         {
@@ -184,6 +190,8 @@ namespace exceltabl
 
         private async void btnRun_Click(object sender, EventArgs e)
         {
+            MaxVariantsToFind = chkAllVariants.Checked ? 0 : (int)numVariants.Value;
+
             if (disciplines == null || disciplines.Count == 0)
             {
                 MessageBox.Show("Сначала загрузите файл с данными", "Ошибка",
@@ -272,14 +280,14 @@ namespace exceltabl
                 // Генерируем все возможные комбинации
                 int blocks = blockResultsList.Count;
                 int[] counts = blockResultsList.Select(l => l.Count).ToArray();
-                const int MaxFinalVariants = 1000; // Ограничение на количество итоговых вариантов
+                int maxFinalVariants = MaxVariantsToFind <= 0 ? int.MaxValue : MaxVariantsToFind; // Ограничение на количество итоговых вариантов
 
                 foundVariants = new List<Dictionary<string, double>>();
                 try
                 {
                     void GenerateAndProcess(int[] indices, int depth)
                     {
-                        if (foundVariants.Count >= MaxFinalVariants)
+                        if (foundVariants.Count >= maxFinalVariants)
                             return;
                         if (depth == blocks)
                         {
@@ -302,7 +310,7 @@ namespace exceltabl
                         {
                             indices[depth] = i;
                             GenerateAndProcess(indices, depth + 1);
-                            if (foundVariants.Count >= MaxFinalVariants)
+                            if (foundVariants.Count >= maxFinalVariants)
                                 break;
                         }
                     }
@@ -605,6 +613,8 @@ namespace exceltabl
             Dictionary<string, double> path,
             List<Dictionary<string, double>> result)
         {
+            if (result.Count >= MaxVariantsToFind && MaxVariantsToFind > 0) return;
+
             if (curr_sum > target_sum + BlockTolerance)
                 return;
 
