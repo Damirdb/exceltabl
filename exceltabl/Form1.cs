@@ -32,18 +32,12 @@ namespace exceltabl
         private const double DifferenceThreshold = 1.0; // Порог разницы для оптимизации
         // Допуски для приближённых решений
         const double BlockTolerance = 0.01; // допустимое отклонение по блоку
+        const double GlobalTolerance = 2.0; // допустимое отклонение по общей сумме
 
         // В классе Form1 добавим поле для хранения найденных вариантов
         private List<Dictionary<string, double>> foundVariants = new List<Dictionary<string, double>>();
 
         private List<double> objectiveValues = new List<double>();
-
-        private int MaxVariantsToFind = 1000;
-
-        private void chkAllVariants_CheckedChanged(object sender, EventArgs e)
-        {
-            numVariants.Enabled = !chkAllVariants.Checked;
-        }
 
         public Form1()
         {
@@ -190,8 +184,6 @@ namespace exceltabl
 
         private async void btnRun_Click(object sender, EventArgs e)
         {
-            MaxVariantsToFind = chkAllVariants.Checked ? 0 : (int)numVariants.Value;
-
             if (disciplines == null || disciplines.Count == 0)
             {
                 MessageBox.Show("Сначала загрузите файл с данными", "Ошибка",
@@ -280,14 +272,14 @@ namespace exceltabl
                 // Генерируем все возможные комбинации
                 int blocks = blockResultsList.Count;
                 int[] counts = blockResultsList.Select(l => l.Count).ToArray();
-                int maxFinalVariants = MaxVariantsToFind <= 0 ? int.MaxValue : MaxVariantsToFind; // Ограничение на количество итоговых вариантов
+                const int MaxFinalVariants = 1000; // Ограничение на количество итоговых вариантов
 
                 foundVariants = new List<Dictionary<string, double>>();
                 try
                 {
                     void GenerateAndProcess(int[] indices, int depth)
                     {
-                        if (foundVariants.Count >= maxFinalVariants)
+                        if (foundVariants.Count >= MaxFinalVariants)
                             return;
                         if (depth == blocks)
                         {
@@ -302,15 +294,18 @@ namespace exceltabl
                                     finalVariant[kv.Key] += kv.Value;
                                 }
                             }
-                            if (!foundVariants.Any(existing => AreDictionariesEqual(existing, finalVariant)))
+                            if (IsValidCombination(finalVariant) &&
+                                !foundVariants.Any(existing => AreDictionariesEqual(existing, finalVariant)))
+                            {
                                 foundVariants.Add(finalVariant);
+                            }
                             return;
                         }
                         for (int i = 0; i < counts[depth]; i++)
                         {
                             indices[depth] = i;
                             GenerateAndProcess(indices, depth + 1);
-                            if (foundVariants.Count >= maxFinalVariants)
+                            if (foundVariants.Count >= MaxFinalVariants)
                                 break;
                         }
                     }
@@ -398,18 +393,6 @@ namespace exceltabl
                         kv => kv.Key,
                         kv => kv.Value is double d ? d.ToString("F2") : kv.Value.ToString()
                     )).ToList();
-
-                    // После формирования foundVariants и перед выводом/сохранением
-                    // Проверим сумму MinValue по excludedDisciplines и выведем предупреждение, если итог не 244
-                    double excludedSumCheck = disciplines
-                        .Where(d => excludedDisciplines.Contains(d.Name))
-                        .Sum(d => d.MinValue);
-                    double blockTargetSum = targetSums.Values.Sum(); // 240
-                    double expectedTotal = blockTargetSum + excludedSumCheck;
-                    if (Math.Abs(expectedTotal - 244.0) > 0.01)
-                    {
-                        MessageBox.Show($"Внимание! Сумма по блокам: {blockTargetSum}, сумма по исключённым дисциплинам: {excludedSumCheck}, итоговая сумма: {expectedTotal}.\nОжидается 244. Проверьте targetSums и MinValue исключённых дисциплин.", "Контроль суммы", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
 
                     MessageBox.Show($"Найдено {foundVariants.Count} уникальных вариантов. Для сохранения используйте кнопку 'Сохранить'.", "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
@@ -522,42 +505,42 @@ namespace exceltabl
         private bool IsValidCombination(Dictionary<string, double> combination)
         {
             // 1. Проверка суммы по парам семестров (без исключённых дисциплин)
-            var targetSums = new Dictionary<int, double> { { 1, 60.5 }, { 3, 59.5 }, { 5, 60.0 }, { 7, 60.0 } };
-            foreach (var target in targetSums)
-            {
-                double sum = 0;
-                foreach (var kv in combination)
-                {
-                    var disc = disciplines.First(d => d.Id == kv.Key);
-                    if (excludedDisciplines.Contains(disc.Name)) continue;
-                    if (disc.Semesters.Contains(target.Key) || disc.Semesters.Contains(target.Key + 1))
-                        sum += kv.Value;
-                }
-                if (Math.Abs(sum - target.Value) > 0.01) return false;
-            }
+            // var targetSums = new Dictionary<int, double> { { 1, 60.5 }, { 3, 59.5 }, { 5, 60.0 }, { 7, 60.0 } };
+            // foreach (var target in targetSums)
+            // {
+            //     double sum = 0;
+            //     foreach (var kv in combination)
+            //     {
+            //         var disc = disciplines.First(d => d.Id == kv.Key);
+            //         if (excludedDisciplines.Contains(disc.Name)) continue;
+            //         if (disc.Semesters.Contains(target.Key) || disc.Semesters.Contains(target.Key + 1))
+            //             sum += kv.Value;
+            //     }
+            //     if (Math.Abs(sum - target.Value) > 0.01) return false;
+            // }
             // 2. Проверка разницы по семестрам (все дисциплины)
-            var semesterLoad = new Dictionary<int, double>();
-            foreach (var kv in combination)
-            {
-                var disc = disciplines.First(d => d.Id == kv.Key);
-                foreach (var sem in disc.Semesters)
-                {
-                    if (!semesterLoad.ContainsKey(sem)) semesterLoad[sem] = 0;
-                    semesterLoad[sem] += kv.Value / disc.Semesters.Length;
-                }
-            }
-            var semesters = semesterLoad.Keys.OrderBy(x => x).ToList();
-            for (int i = 0; i < semesters.Count - 1; i += 2)
-            {
-                int s1 = semesters[i];
-                int s2 = semesters[i + 1];
-                if (Math.Abs(semesterLoad[s1] - semesterLoad[s2]) > 6.0) return false;
-            }
+            // var semesterLoad = new Dictionary<int, double>();
+            // foreach (var kv in combination)
+            // {
+            //     var disc = disciplines.First(d => d.Id == kv.Key);
+            //     foreach (var sem in disc.Semesters)
+            //     {
+            //         if (!semesterLoad.ContainsKey(sem)) semesterLoad[sem] = 0;
+            //         semesterLoad[sem] += kv.Value / disc.Semesters.Length;
+            //     }
+            // }
+            // var semesters = semesterLoad.Keys.OrderBy(x => x).ToList();
+            // for (int i = 0; i < semesters.Count - 1; i += 2)
+            // {
+            //     int s1 = semesters[i];
+            //     int s2 = semesters[i + 1];
+            //     if (Math.Abs(semesterLoad[s1] - semesterLoad[s2]) > 6.0) return false;
+            // }
             // 3. Общая сумма (только по дисциплинам без исключений)
-            double total = disciplines
-                .Where(d => !excludedDisciplines.Contains(d.Name))
-                .Sum(d => combination.TryGetValue(d.Id, out var val) ? val : d.MinValue);
-            if (Math.Abs(total - 240.0) > 0.01) return false;
+            // double total = disciplines
+            //     .Where(d => !excludedDisciplines.Contains(d.Name))
+            //     .Sum(d => combination.TryGetValue(d.Id, out var val) ? val : d.MinValue);
+            // if (Math.Abs(total - 240.0) > 0.01) return false;
             return true;
         }
         // Сохранение одной комбинации в Excel
@@ -611,9 +594,11 @@ namespace exceltabl
             double curr_sum,
             int index,
             Dictionary<string, double> path,
-            List<Dictionary<string, double>> result)
+            List<Dictionary<string, double>> result,
+            int maxResults = int.MaxValue)
         {
-            if (result.Count >= MaxVariantsToFind && MaxVariantsToFind > 0) return;
+            if (result.Count >= maxResults)
+                return;
 
             if (curr_sum > target_sum + BlockTolerance)
                 return;
@@ -638,11 +623,13 @@ namespace exceltabl
 
             foreach (double val in valuesToTry)
             {
+                if (result.Count >= maxResults)
+                    break;
                 if (curr_sum + val > target_sum + BlockTolerance)
                     continue;
 
                 path[disc.Id] = val;
-                GenerateCombinationsApproximate(arr, target_sum, curr_sum + val, index + 1, path, result);
+                GenerateCombinationsApproximate(arr, target_sum, curr_sum + val, index + 1, path, result, maxResults);
                 path.Remove(disc.Id);
             }
         }
