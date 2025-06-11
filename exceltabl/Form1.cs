@@ -197,7 +197,7 @@ namespace exceltabl
                 progressBar.Style = ProgressBarStyle.Marquee;
                 progressBar.MarqueeAnimationSpeed = 30;
 
-                var blockSemsList = new[] { new[]{1,2}, new[]{3,4}, new[]{5,6}, new[]{7,8} };
+                var blockSemsList = new[] { new[] { 1, 2 }, new[] { 3, 4 }, new[] { 5, 6 }, new[] { 7, 8 } };
                 var blockResultsList = new List<List<Dictionary<string, double>>>();
                 bool blockFail = false;
                 bool memoryError = false;
@@ -206,20 +206,34 @@ namespace exceltabl
                 {
                     try
                     {
-                        System.Threading.Tasks.Parallel.ForEach(blockSemsList, blockSems =>
+                        foreach (var blockSems in blockSemsList)
                         {
                             double blockTarget = targetSums[blockSems[0]];
                             var blockDisciplines = disciplines
-                                .Where(d => d.Semesters.Any(s => s == blockSems[0] || s == blockSems[1]))
+                                .Where(d => d.Semesters.Any(s => s == blockSems[0] || s == blockSems[1]) && !excludedDisciplines.Contains(d.Name))
                                 .ToList();
-                            var blockResult = GenerateBlockVariants(blockDisciplines, blockSems, blockTarget);
-                            lock (blockResultsList)
-                            {
-                                blockResultsList.Add(blockResult);
-                            }
+
+                            var blockResult = new List<Dictionary<string, double>>();
+                            RecursiveBlockSearch(blockDisciplines, 0, new Dictionary<string, double>(), blockTarget, 0.0, blockResult, 1000);
+
                             if (blockResult.Count == 0)
+                            {
                                 blockFail = true;
-                        });
+                                break;
+                            }
+
+                            // Добавляем исключённые дисциплины с MinValue в каждую комбинацию
+                            foreach (var variant in blockResult)
+                            {
+                                foreach (var d in disciplines.Where(d => excludedDisciplines.Contains(d.Name) &&
+                                    d.Semesters.Any(s => s == blockSems[0] || s == blockSems[1])))
+                                {
+                                    variant[d.Id] = d.MinValue;
+                                }
+                            }
+
+                            blockResultsList.Add(blockResult);
+                        }
                     }
                     catch (OutOfMemoryException)
                     {
@@ -255,11 +269,8 @@ namespace exceltabl
                         double sum = 0.0;
                         foreach (var kv in variant)
                         {
-                            var parts = kv.Key.Split('_');
-                            var id = parts[0];
-                            var sm = int.Parse(parts[1]);
-                            var disc = disciplines.First(d => d.Id == id);
-                            if (disc.Semesters.Contains(sm))
+                            var disc = disciplines.First(d => d.Id == kv.Key);
+                            if (disc.Semesters.Contains(sem))
                             {
                                 sum += disc.Coefficient * kv.Value;
                             }
@@ -277,6 +288,7 @@ namespace exceltabl
 
                 // Обновляем foundVariants отсортированными вариантами
                 foundVariants = sortedVariants.Select(x => x.Variant).ToList();
+                objectiveValues = sortedVariants.Select(x => x.Objective).ToList();
 
                 var allDisciplineIds = disciplines.Select(d => d.Id).ToList();
                 var table = allDisciplineIds.Select(id =>
@@ -295,7 +307,7 @@ namespace exceltabl
                         double value = excludedDisciplines.Contains(disc.Name)
                             ? disc.MinValue
                             : foundVariants[i].TryGetValue(id, out var val) ? val : disc.MinValue;
-                        row[$"Fц={sortedVariants[i].Objective:F2}"] = value;
+                        row[$"Fц={objectiveValues[i]:F2}"] = value;
                     }
                     return row;
                 }).ToList();
@@ -321,7 +333,7 @@ namespace exceltabl
                 {
                     double sum = disciplines
                         .Sum(d => foundVariants[i].TryGetValue(d.Id, out var val) ? val : d.MinValue);
-                    sumRow[$"Fц={sortedVariants[i].Objective:F2}"] = sum;
+                    sumRow[$"Fц={objectiveValues[i]:F2}"] = sum;
                 }
                 table.Add(sumRow);
 
@@ -360,7 +372,7 @@ namespace exceltabl
                         $"Excluded: {excludedSum}\nИтого: {total}", "Диагностика суммы");
                 }
 
-                // Диагностика: выводим для каждого блока список ключей Name+семестр
+                // Диагностика: собираем все ключи по блокам
                 var allBlockKeys = new List<HashSet<string>>();
                 for (int i = 0; i < blockResultsList.Count; i++)
                 {
@@ -368,23 +380,20 @@ namespace exceltabl
                     foreach (var v in blockResultsList[i])
                         foreach (var k in v.Keys)
                         {
-                            var parts = k.Split('_');
-                            var id = parts[0];
-                            var sm = int.Parse(parts[1]);
-                            var disc = disciplines.FirstOrDefault(d => d.Id == id);
+                            var disc = disciplines.FirstOrDefault(d => d.Id == k);
                             if (disc != null)
-                                keys.Add($"{disc.Name} (семестр {sm})");
+                                keys.Add($"{disc.Name} (семестры {string.Join(",", disc.Semesters)})");
                         }
                     allBlockKeys.Add(keys);
-                    // MessageBox.Show($"Блок {i+1}: {keys.Count} уникальных ключей\n" + string.Join("\n", keys.Take(30)), $"Ключи блока {i+1}");
                 }
+
                 // Диагностика: выводим пересечения между блоками
                 for (int i = 0; i < allBlockKeys.Count; i++)
-                    for (int j = i+1; j < allBlockKeys.Count; j++)
+                    for (int j = i + 1; j < allBlockKeys.Count; j++)
                     {
                         var intersect = allBlockKeys[i].Intersect(allBlockKeys[j]).ToList();
                         if (intersect.Count > 0)
-                            MessageBox.Show($"Пересечения между блоками {i+1} и {j+1}: {intersect.Count}\n" + string.Join("\n", intersect.Take(30)), $"Пересечения {i+1}-{j+1}");
+                            MessageBox.Show($"Пересечения между блоками {i + 1} и {j + 1}: {intersect.Count}\n" + string.Join("\n", intersect.Take(30)), $"Пересечения {i + 1}-{j + 1}");
                     }
             }
             finally
@@ -459,43 +468,18 @@ namespace exceltabl
         // Проверка полной комбинации
         private bool IsValidCombination(Dictionary<string, double> combination)
         {
-            // 1. Проверка суммы по парам семестров (без исключённых дисциплин)
-            // var targetSums = new Dictionary<int, double> { { 1, 60.5 }, { 3, 59.5 }, { 5, 60.0 }, { 7, 60.0 } };
-            // foreach (var target in targetSums)
-            // {
-            //     double sum = 0;
-            //     foreach (var kv in combination)
-            //     {
-            //         var disc = disciplines.First(d => d.Id == kv.Key);
-            //         if (excludedDisciplines.Contains(disc.Name)) continue;
-            //         if (disc.Semesters.Contains(target.Key) || disc.Semesters.Contains(target.Key + 1))
-            //             sum += kv.Value;
-            //     }
-            //     if (Math.Abs(sum - target.Value) > 0.01) return false;
-            // }
-            // 2. Проверка разницы по семестрам (все дисциплины)
-            // var semesterLoad = new Dictionary<int, double>();
-            // foreach (var kv in combination)
-            // {
-            //     var disc = disciplines.First(d => d.Id == kv.Key);
-            //     foreach (var sem in disc.Semesters)
-            //     {
-            //         if (!semesterLoad.ContainsKey(sem)) semesterLoad[sem] = 0;
-            //         semesterLoad[sem] += kv.Value / disc.Semesters.Length;
-            //     }
-            // }
-            // var semesters = semesterLoad.Keys.OrderBy(x => x).ToList();
-            // for (int i = 0; i < semesters.Count - 1; i += 2)
-            // {
-            //     int s1 = semesters[i];
-            //     int s2 = semesters[i + 1];
-            //     if (Math.Abs(semesterLoad[s1] - semesterLoad[s2]) > 6.0) return false;
-            // }
-            // 3. Общая сумма (только по дисциплинам без исключений)
-            // double total = disciplines
-            //     .Where(d => !excludedDisciplines.Contains(d.Name))
-            //     .Sum(d => combination.TryGetValue(d.Id, out var val) ? val : d.MinValue);
-            // if (Math.Abs(total - 240.0) > 0.01) return false;
+            // 3. Общая сумма (только по дисциплинам без исключений, с учётом Id_Семестр)
+            double total = 0;
+            foreach (var kv in combination)
+            {
+                var parts = kv.Key.Split('_');
+                var id = parts[0];
+                var sm = int.Parse(parts[1]);
+                var disc = disciplines.FirstOrDefault(d => d.Id == id);
+                if (disc != null && !excludedDisciplines.Contains(disc.Name))
+                    total += kv.Value;
+            }
+            if (Math.Abs(total - 240.0) > 0.01) return false;
             return true;
         }
         // Сохранение одной комбинации в Excel
@@ -520,15 +504,12 @@ namespace exceltabl
                 double sum = 0;
                 foreach (var kv in combination)
                 {
-                    var parts = kv.Key.Split('_');
-                    var id = parts[0];
-                    var sm = int.Parse(parts[1]);
-                    var disc = disciplines.First(d => d.Id == id);
+                    var disc = disciplines.First(d => d.Id == kv.Key);
                     sheet.Cell(row, 1).Value = disc.Name;
                     sheet.Cell(row, 2).Value = disc.MinValue;
                     sheet.Cell(row, 3).Value = disc.MaxValue;
                     sheet.Cell(row, 4).Value = disc.Coefficient;
-                    sheet.Cell(row, 5).Value = sm;
+                    sheet.Cell(row, 5).Value = string.Join(", ", disc.Semesters);
                     // Заполняем только нужный столбец для этого варианта
                     double value = excludedDisciplines.Contains(disc.Name)
                         ? disc.MinValue
@@ -1013,6 +994,36 @@ namespace exceltabl
                 }
             );
             return globalTop.OrderByDescending(x => x.Item1).Select(x => x.Item2).ToList();
+        }
+
+        private void RecursiveBlockSearch(
+            List<Discipline> blockDisciplines,
+            int index,
+            Dictionary<string, double> current,
+            double targetSum,
+            double currSum,
+            List<Dictionary<string, double>> results,
+            int maxResults = int.MaxValue)
+        {
+            if (results.Count >= maxResults)
+                return;
+
+            if (index == blockDisciplines.Count)
+            {
+                if (Math.Abs(currSum - targetSum) <= BlockTolerance)
+                    results.Add(new Dictionary<string, double>(current));
+                return;
+            }
+
+            var disc = blockDisciplines[index];
+            for (double val = disc.MinValue; val <= disc.MaxValue + 0.0001; val += 1.0)
+            {
+                if (currSum + val > targetSum + BlockTolerance)
+                    continue;
+                current[disc.Id] = val;
+                RecursiveBlockSearch(blockDisciplines, index + 1, current, targetSum, currSum + val, results, maxResults);
+                current.Remove(disc.Id);
+            }
         }
     }
 
